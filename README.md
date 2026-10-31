@@ -1,216 +1,219 @@
-# TF-C with Dual DINOv3 Encoders and DINOv3-Inspired Self-Supervised Losses
+# TF-C-DINOv3: Time–Frequency Representation Learning with Dual DINOv3 Encoders
 
-**Research implementation for Human Activity Recognition (HAR) and Sensor-Based Gesture Recognition (SGR)**
+**An academic research implementation for Human Activity Recognition (HAR) and Sensor-Based Gesture Recognition (SGR) from three-axis accelerometer data.**
 
-| Project metadata | Value |
-| --- | --- |
-| Project type | Academic research prototype; PyTorch command-line training pipeline |
-| Research implementation | TF-C with two DINOv3 ViT-S/16 backbones and adapted DINO, iBOT, and KoLeo losses |
-| Documentation revision | 2026-10-30 |
-| Repository maintainer | Project repository owner (see repository history) |
-| Upstream TF-C | [mims-harvard/TFC-pretraining](https://github.com/mims-harvard/TFC-pretraining) |
-| DINOv3 pretrained checkpoint | [`facebook/dinov3-vits16-pretrain-lvd1689m`](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m) |
-| Verification status | **4/4 offline CPU unit tests passed; real DINOv3 end-to-end training has not yet been verified** |
+[![Python](https://img.shields.io/badge/Python-3.11-blue)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/Framework-PyTorch-orange)](https://pytorch.org/)
+[![Research](https://img.shields.io/badge/Status-Research%20Prototype-lightgrey)](https://github.com/NnTien1802/TF-C-DINOv3)
 
-> **Important distinction:** This repository adapts selected concepts from DINOv3 to TF-C and accelerometer time series. It is **not** an official Meta DINOv3 implementation, a reproduction of its full image-pretraining recipe, or a demonstrated improvement in accuracy. Performance results must be collected from actual HAR/SGR experiments before any model-performance claim is made.
+**Repository:** https://github.com/NnTien1802/TF-C-DINOv3  
+**Based on:** [TF-C Pretraining](https://github.com/mims-harvard/TFC-pretraining)  
+**Pretrained backbone:** [DINOv3 ViT-S/16](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m)
+
+> **Implementation status:** The modified source code and offline unit tests are available. Offline tests use a mock ViT backbone; successfully training and evaluating the real DINOv3 checkpoint on HAR/SGR has **not yet been established**. No accuracy, F1-score, or deployment benchmark is claimed here.
+>
+> **Research attribution:** This is a **DINOv3-inspired adaptation of TF-C**, not the official DINOv3 training implementation from Meta and not a full reproduction of its large-scale pretraining procedure.
 
 ## 1. Project Overview
 
-**Problem.** Recognizing human activities and gestures from smartphone and smartwatch accelerometers requires useful representations of multivariate time-series signals. The original TF-C framework learns representations using consistency between time-domain and frequency-domain views.
+### 1.1 Problem and objective
 
-**Proposed approach.** This research version retains TF-C's two-domain design but replaces both original Transformer encoders with separate pretrained **DINOv3 ViT-S/16** backbones. It also replaces the original NT-Xent-Poly training objective with a **DINOv3-inspired student–teacher objective** combining CLS-token distillation (DINO), masked patch-token distillation (iBOT), and embedding diversity regularization (KoLeo).
+Accelerometer-based activity and gesture recognition involves classifying sequences of motion measurements from three sensor axes: **X, Y, and Z**. The original **Time–Frequency Contrastive Learning (TF-C)** framework learns features by contrasting time-domain and frequency-domain representations.
 
-**Intended users.** Students, researchers, and reviewers evaluating time-series representation learning, architectural modifications, loss functions, and downstream sensor classification.
+This project investigates two architectural modifications:
 
-**Scope of this code package:**
+1. **Replace both TF-C encoders** with two separate pretrained **DINOv3 ViT-S/16** backbones: one for time-domain signals and one for frequency-domain features.
+2. **Replace the original NT-Xent-Poly-based objective** with a lightweight **DINOv3-inspired self-supervised loss** combining DINO CLS-token distillation, iBOT masked-patch distillation, and KoLeo regularization.
 
-- Read prepared, labeled HAR/SGR `.pt` datasets with independent train/validation/test splits.
-- Encode the same three-axis signal in **time** and **frequency** branches using two independent DINOv3 backbones.
-- Run self-supervised pre-training with a student and an exponential-moving-average (EMA) teacher.
-- Fine-tune a classifier and evaluate HAR/SGR predictions on held-out target data.
-- Save training logs, per-epoch metrics, model checkpoints, and final test metrics.
-- Run synthetic offline tests without downloading DINOv3 weights.
+The intended outcome is a reproducible experimental pipeline for comparing representation quality and downstream classification, not a production-ready mobile or web application.
 
-**Out of scope of this code package:** loading raw Sensor Logger CSV/ZIP recordings directly, collecting data, a complete web/API inference service, reproducing every official DINOv3 training detail, and a completed benchmark of 10 methods.
+### 1.2 Project scope
+
+The current Python project supports:
+
+- Loading prepared HAR/SGR datasets saved as PyTorch `.pt` files.
+- Preserving all **three accelerometer channels** in the loading and augmentation pipeline.
+- Generating time-domain and FFT-magnitude frequency-domain views.
+- Self-supervised pretraining with a student network and an exponential moving average (**EMA**) teacher.
+- Supervised fine-tuning, validation-based model selection, and held-out test evaluation.
+- Saving checkpoints, training logs, and evaluation metrics.
+- Running offline unit tests with a mock vision backbone.
+
+Raw Sensor Logger CSV recordings, a web interface, a REST API, ONNX export, and a complete 10-method benchmark are **not implemented in this training package**.
 
 ## 2. System Overview
 
-### 2.1 Architecture
+### 2.1 Architecture and data flow
 
 ```text
-Input: 3-axis accelerometer window [B, 3, 206]
-                            |
-                +-----------+-----------+
-                |                       |
-        Time-domain signal       Magnitude FFT signal
-                |                       |
-        XYZ-to-image adapter      XYZ-to-image adapter
-                |                       |
-       DINOv3 ViT-S/16 (T)      DINOv3 ViT-S/16 (F)
-                |                       |
-          CLS + patch tokens      CLS + patch tokens
-                |                       |
-        Projector / DINO head    Projector / DINO head
-          + iBOT patch head       + iBOT patch head
-                |                       |
-                +-----------+-----------+
-                            |
-                  DINO + iBOT + KoLeo
-               (EMA teacher during SSL)
-                            |
-                   [z_time || z_freq]
-                            |
-                 Downstream classifier
-                            |
-                 HAR / SGR class logits
+Accelerometer window [B, 3, 206]
+                  |
+           Data preparation
+                  |
+        +---------+---------+
+        |                   |
+    Time signal       FFT magnitude
+        |                   |
+   XYZ-to-image        XYZ-to-image
+      adapter             adapter
+        |                   |
+  DINOv3 ViT-S/16    DINOv3 ViT-S/16
+   (Time branch)    (Frequency branch)
+        |                   |
+  CLS/patch tokens   CLS/patch tokens
+        |                   |
+  Projection heads   Projection heads
+        |                   |
+        +---------+---------+
+                  |
+        DINO + iBOT + KoLeo
+       (student / EMA teacher)
+                  |
+      Concatenated embeddings
+                  |
+         Classifier head
+                  |
+          HAR / SGR logits
 ```
 
-**Execution location:** training and evaluation run locally in Python on a CPU or CUDA GPU. The code package does not launch a backend or web server. No database, Node.js installation, or `.env` file is required by the current Python scripts.
+**Time branch:** each of the X/Y/Z signals is normalized, resized, and repeated vertically to form a three-channel image-like tensor.  
+**Frequency branch:** the magnitude of the FFT is transformed using `log1p`, normalized, and adapted to an image-like tensor.  
+**Backbones:** the time and frequency branches use **independent model instances**, initially loaded from the same pretrained DINOv3 weights.  
+**Classifier:** concatenates two 128-dimensional projected features and returns class logits.
 
-### 2.2 Processing flow
+The image adapters are simple signal-to-image transformations. They are **not** trained spectrogram generators, and their suitability for DINOv3 must be established through real experiments.
 
-1. **Data loading:** load `train.pt`, `val.pt`, and `test.pt`; preserve acceleration axes X, Y, and Z.
-2. **Time view:** apply per-axis normalization and resize the one-dimensional signal into an image-like tensor.
-3. **Frequency view:** calculate the magnitude of the FFT, then use the image adapter on the frequency representation.
-4. **Feature extraction:** process the two images with independent, pretrained DINOv3 ViT backbones.
-5. **Self-supervised pre-training:** predict teacher targets with the DINO/iBOT/KoLeo objective and update the teacher using EMA.
-6. **Supervised fine-tuning:** concatenate the two 128-dimensional projected features, train a classification head, and select the checkpoint using **validation macro-F1**.
-7. **Final evaluation:** load the best validation checkpoint and evaluate the target **test set once**.
+### 2.2 Modified self-supervised loss
 
-The XYZ-to-image adapter repeats each one-dimensional channel over image height. It is **not** a learned image representation or a validated spectrogram transform; its suitability for accelerometer recognition remains an experimental question.
-
-## 3. Project Structure and Code Changes
+The adapted loss used in pretraining is:
 
 ```text
-TFC_DINOv3_Loss_Updated/
-├── README.md
-├── main.py                     # CLI, configuration, device, checkpoints
-├── model.py                    # Two DINOv3 branches, adapters, projection heads
-├── loss.py                     # Adapted DINO + iBOT + KoLeo objective
-├── trainer.py                  # Pre-training, fine-tuning, validation, testing
-├── dataloader.py               # XYZ-preserving data loader and split enforcement
-├── augmentations.py            # Time jitter and frequency masking
-├── requirements.txt
-├── utils.py
-├── config_files/
-│   ├── __init__.py
-│   ├── HAR_Configs.py
-│   └── SGR_Configs.py
-├── tests/
-│   ├── test_smoke.py            # Mock ViT, gradients, teacher update, loss
-│   └── test_data.py             # XYZ dimensions and split handling
-├── model_original.py           # Original supplied file for comparison
-├── loss_original.py
-├── trainer_original.py
-├── main_original.py
-└── datasets/                    # CREATE locally; dataset files are not bundled
-    ├── HAR/
-    │   ├── train.pt
-    │   ├── val.pt
-    │   └── test.pt
-    └── SGR/
-        ├── train.pt
-        ├── val.pt
-        └── test.pt
+L_SSL = w_dino * (L_DINO_within + w_cross * L_DINO_cross)
+      + w_ibot * L_iBOT
+      + w_koleo * L_KoLeo
 ```
 
-### 3.1 Modified modules
+| Component | Function |
+| --- | --- |
+| DINO within-domain | Matches augmented student CLS-token predictions to EMA-teacher targets within each domain. |
+| DINO cross-domain | Aligns student representations with teacher predictions from the other domain. |
+| iBOT | Matches masked student patch predictions to unmasked teacher patch targets within the same domain. |
+| KoLeo | Encourages diversity among normalized student embeddings. |
+| EMA teacher | Updates teacher parameters from student parameters without backpropagating through the teacher. |
 
-| File | Original behavior | Modified behavior |
+The teacher targets use a **local Sinkhorn–Knopp** procedure. This implementation does **not** reproduce Meta's complete distributed DINOv3 recipe or optional Gram Loss.
+
+Fine-tuning uses supervised **Cross-Entropy Loss** by default. An optional self-supervised regularizer is controlled by `--finetune_ssl_weight` (default: `0.0`).
+
+## 3. Project Structure and Modified Files
+
+The repository currently contains two separate code directories: `code_goc/` for the original TF-C reference files and `code_da_sua/` for the modified implementation. The directory tree below reflects the files visible in the GitHub repository on the `main` branch.
+
+```text
+TF-C-DINOv3/
+├── README.md                    # Project documentation
+├── code_goc/                   # Original TF-C source files
+│   ├── loss.py                 # Original contrastive loss functions
+│   ├── main.py                 # Original training entry point
+│   ├── model.py                # Original TF-C encoders and classifier
+│   └── trainer.py              # Original training and evaluation routines
+└── code_da_sua/               # Modified TF-C implementation
+    ├── loss.py                 # DINOv3-inspired loss components
+    ├── main.py                 # Updated training entry point
+    ├── model.py                # Dual DINOv3 encoder implementation
+    └── trainer.py              # Updated training and evaluation routines
+```
+
+**Repository layout note:** Only the files shown above are present in this GitHub directory view. Additional dependencies such as `dataloader.py`, `augmentations.py`, `utils.py`, `config_files/`, datasets, and environment files are **not shown in the repository**. Running the training pipeline may require these files to be added or restored separately; their presence should not be assumed.
+
+### 3.1 Summary of code changes
+
+| File | Modification |
+| --- | --- |
+| `model.py` | Replaced the two original Transformer encoders with time/frequency DINOv3 ViT-S/16 branches; added adapters, projection heads, and token-level outputs. |
+| `loss.py` | Added a compact DINOv3-inspired student–teacher objective using DINO, iBOT, KoLeo, and local Sinkhorn assignments. |
+| `trainer.py` | Added an EMA teacher and new SSL training flow; updates gradients per batch; selects the final model using validation macro-F1. |
+| `main.py` | Added explicit command-line controls, consistent checkpoint paths, source/target dataset options, and training configuration. |
+| `dataloader.py` | Preserves all three sensor axes and requires a separate validation split rather than reusing test data. |
+| `augmentations.py` | Uses Torch-based time/frequency augmentations without hardcoded CUDA allocation. |
+| `tests/` | Provides offline unit tests that do not require downloading the real DINOv3 model. |
+
+The `*_original.py` files are **reference snapshots** for reviewers and are not executed by the updated training commands. They do not form a ready-to-run original TF-C baseline on their own.
+
+### 3.2 Datasets
+
+| Dataset | Description | Prepared splits |
 | --- | --- | --- |
-| [`model.py`](model.py) | Two PyTorch `TransformerEncoder` branches | Two independent DINOv3 ViT-S/16 backbones; time/frequency image adapters; CLS and patch features; DINO/iBOT heads |
-| [`loss.py`](loss.py) | `NTXentLoss_poly` used for TF-C contrastive training | `DINOv3AdaptedLoss`, local Sinkhorn-Knopp teacher assignments, DINO distillation, iBOT patch loss, and KoLeo |
-| [`trainer.py`](trainer.py) | TF-C contrastive objective and downstream training | EMA teacher, gradient reset per batch, modified SSL objective, validation-based checkpointing, and a single final test evaluation |
-| [`main.py`](main.py) | Original dataset and Transformer-specific training entry point | Explicit DINOv3 and loss CLI options, model compatibility checks, portable dataset/output paths |
-| [`dataloader.py`](dataloader.py) | Prior processing could select only one input axis | Preserves all three XYZ axes and requires a separate validation split |
-| [`augmentations.py`](augmentations.py) | Original augmentation implementations | Torch-native jitter and frequency masking that do not require hardcoded CUDA tensors |
-| `tests/` | Not supplied in the four-file baseline | Synthetic unit tests for dimensions, loss gradients, EMA, and data boundaries |
+| HAR | Smartphone accelerometer activity windows; 10,369 samples across Walking, Stairs, Sitting, and Standing. | `train.pt`, `val.pt`, `test.pt` |
+| SGR | Smartwatch accelerometer gesture windows; 1,200 samples across Typing, Teeth, Drinking, Writing, Clapping, and Folding. | `train.pt`, `val.pt`, `test.pt` |
+| Private HAR | 12 self-recorded Sensor Logger sessions with 19,795 raw accelerometer measurements. | Raw CSV data; **not directly consumed** by `dataloader.py` |
 
-For reviewer-friendly comparisons, original versions of the four user-supplied files are included as `*_original.py`. These snapshots are for reference, **not** runnable experiment presets. A complete original TF-C baseline requires the original repository and its own environment.
+**Dataset location:** [TF-C: Human Activity and Gesture Recognition Data on Kaggle](https://www.kaggle.com/datasets/nguynngctin1881/dataset-tf-c).  
+**Public EDA notebook:** [EDA_dataset](https://www.kaggle.com/code/nguynngctin1881/eda-dataset).
 
-### 3.2 The implemented loss function
+The loader expects each `.pt` split to contain a dictionary with `samples` and `labels`, where `samples` has shape `[N, 3, L]` or `[N, L, 3]`. Each signal is trimmed or zero-padded to a length of 206. The dataset archives may also contain `README.md`, label mappings, and split summaries; these metadata files are optional for the loader but useful for documentation.
 
-The self-supervised pre-training objective is:
-
-```text
-L_ssl = w_dino * [L_dino_within + w_cross * L_dino_cross]
-      + w_ibot * L_ibot
-      + w_koleo * L_koleo
-```
-
-- **DINO / within-domain:** an augmented student CLS representation is trained to match an unaugmented EMA teacher distribution in the same domain.
-- **DINO / cross-domain:** time and frequency student CLS outputs are also matched to teacher distributions from the opposite branch.
-- **iBOT:** masked student patch predictions match unmasked teacher patch targets **within the same domain**. Time and frequency patch positions are not assumed to correspond.
-- **KoLeo:** regularizes student embedding diversity through nearest-neighbor distances.
-- **EMA teacher:** teacher parameters are updated from student parameters; the teacher is not optimized by backpropagation.
-
-The supervised fine-tuning objective is:
-
-```text
-L_finetune = CrossEntropy(class_logits, labels)
-           + finetune_ssl_weight * L_ssl
-```
-
-The default `finetune_ssl_weight` is `0.0` (classification loss only). Optional SSL regularization can be enabled for research ablation experiments.
-
-**Implementation differences from official DINOv3:** this package does not reproduce the exact DINOHead, large-scale distributed/multi-crop training, all official schedules, or optional Gram Loss. It uses a lightweight local student–teacher adaptation for sensor data and small batches; it should be described as *DINOv3-inspired*, not *the official DINOv3 loss implementation*.
+Do **not** mix the private raw data into the published test metrics without defining a separate preprocessing and recording-level split strategy.
 
 ## 4. Environment and Prerequisites
 
-| Component | Requirement / note |
+| Item | Requirement |
 | --- | --- |
-| Operating system | Windows 10/11 (instructions below); Linux is also possible but is not verified here |
-| Python | **3.11.x** recommended for the existing `tfc-dinov3-py311` Conda environment |
-| Deep learning framework | PyTorch with a build appropriate for the computer's CPU/CUDA setup |
-| Transformers | `>=4.57,<5`, as declared in `requirements.txt` |
-| Other dependencies | `huggingface_hub>=0.34`, `numpy>=1.24`, `scikit-learn>=1.3` |
-| Model weights | `facebook/dinov3-vits16-pretrain-lvd1689m`; downloaded separately, not included in this repository |
-| Internet access | Required for the first model download unless the weights are already cached |
-| Authentication | Hugging Face login and model-access approval may be needed for the checkpoint |
-| GPU | CUDA-capable GPU recommended for real training; a laptop GPU with 8 GB VRAM may be insufficient for some configurations |
-| Database, Node.js, API keys, `.env` | **Not used by this Python training package** |
+| Operating system | Windows 10/11 recommended for the instructions below |
+| Python | Python **3.11.x** |
+| Framework | PyTorch; install a compatible CPU or CUDA build |
+| Transformers | `>=4.57,<5`, as specified by `requirements.txt` |
+| Other Python packages | `huggingface_hub`, `numpy`, `scikit-learn` |
+| Pretrained model | `facebook/dinov3-vits16-pretrain-lvd1689m` |
+| Hardware | CPU for lightweight tests; CUDA GPU recommended for DINOv3 training |
+| Storage | Space for both the pretrained checkpoint and training outputs |
+| Internet access | Required for the initial model download unless already cached |
 
-> **Verified test environment:** the included offline unit tests passed in this session with **Python 3.13 and PyTorch 2.10.0+cpu**. The full pretrained DINOv3 model was **not** loaded or trained in that environment because `transformers` and the actual model weights were unavailable. The recommended Windows/Python 3.11/CUDA environment must be verified on the user's machine.
+The default configuration freezes the pretrained DINOv3 backbone parameters. This reduces gradient memory, but the project may still instantiate **two student backbones and an EMA teacher copy**; training can exceed the capacity of an 8 GB GPU. Use small batches for initial checks.
 
-### 4.1 Memory considerations
-
-Two independent student backbones and a deep-copied EMA teacher can require **four ViT backbone instances** in memory. The backbone parameters are frozen by default to reduce training memory, but this does **not** eliminate model-weight memory or guarantee that 8 GB VRAM is sufficient.
-
-For an initial GPU check, start with `--batch_size 2 --target_batch_size 2 --image_size 112`, and **do not** enable `--unfreeze_backbone`. If out-of-memory errors persist, reduce batch size, review GPU memory use, or move the experiment to a larger GPU. Freezing the backbone also means the original pretrained ViT weights are **not** updated during standard training; projection and prototype heads still learn.
-
-## 5. Setup (Windows / Conda / VS Code)
-
-Run the following commands from **Anaconda Prompt** or the **VS Code integrated terminal**. All commands in subsequent sections assume the terminal is in the project directory containing `main.py`.
-
-### Step 1 — Obtain the project and open its folder
-
-Download and extract the supplied source-code archive, or clone the repository **after uploading this modified code to GitHub**:
+### 4.1 Confirm the Python environment
 
 ```powershell
-# Replace the URL with the repository URL containing this modified version.
-git clone <YOUR_MODIFIED_REPOSITORY_URL>
-cd <YOUR_REPOSITORY_DIRECTORY>
-```
-
-If using the downloaded ZIP, extract it and run `cd` into `TFC_DINOv3_Loss_Updated`. Verify that `main.py`, `model.py`, `loss.py`, and `requirements.txt` are visible.
-
-### Step 2 — Activate or create a Conda environment
-
-```powershell
-# Use the existing environment if it has already been created.
-conda activate tfc-dinov3-py311
 python --version
+python -c "import torch; print(torch.__version__); print('CUDA:', torch.cuda.is_available())"
 ```
 
-If that environment does not exist, create it first:
+**Expected:** Python reports version `3.11.x`; PyTorch imports successfully. CUDA is `True` only when a compatible NVIDIA/PyTorch CUDA installation is available.
+
+## 5. Setup
+
+Run the following commands in **Anaconda Prompt**, **PowerShell**, or the **VS Code terminal**. Python-based archive extraction is used below to work in both CMD and PowerShell.
+
+### Step 1 — Clone the repository
+
+```powershell
+git clone https://github.com/NnTien1802/TF-C-DINOv3.git
+cd TF-C-DINOv3
+```
+
+**Expected:** the working directory contains `main.py`, `model.py`, `loss.py`, and `requirements.txt`. If those files are inside a nested source folder, open that folder instead before continuing.
+
+### Step 2 — Create or activate the Conda environment
+
+If your environment already exists:
+
+```powershell
+conda activate tfc-dinov3-py311
+```
+
+Otherwise:
 
 ```powershell
 conda create -n tfc-dinov3-py311 python=3.11 -y
 conda activate tfc-dinov3-py311
-python --version
 ```
 
-**Expected:** the reported Python version begins with `3.11` and the terminal prompt shows `(tfc-dinov3-py311)`.
+Check the active interpreter:
+
+```powershell
+python --version
+python -c "import sys; print(sys.executable)"
+```
 
 ### Step 3 — Install dependencies
 
@@ -219,130 +222,87 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-For GPU acceleration, ensure the installed PyTorch build matches your NVIDIA driver and CUDA runtime; follow the [official PyTorch installation selector](https://pytorch.org/get-started/locally/) rather than assuming one CUDA wheel works on every machine.
+If CUDA is required, install the PyTorch wheel selected for your computer at [pytorch.org](https://pytorch.org/get-started/locally/) and confirm `torch.cuda.is_available()` returns `True`.
 
-Verify imports and CUDA availability:
+Verify the key imports:
 
 ```powershell
-python -c "import torch, transformers; print('torch:', torch.__version__); print('transformers:', transformers.__version__); print('CUDA available:', torch.cuda.is_available())"
+python -c "import torch, transformers, sklearn; print('PyTorch:', torch.__version__); print('Transformers:', transformers.__version__)"
 ```
-
-**Expected:** the command prints both package versions without an import error. On a properly configured CUDA computer, `CUDA available: True` is expected. CPU-only tests can still run when it prints `False`.
 
 ### Step 4 — Obtain DINOv3 checkpoint access
 
-1. Open the [DINOv3 ViT-S/16 model page](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m).
-2. Accept applicable access terms and obtain permission if the model is gated.
-3. Authenticate locally:
+The project loads the following Hugging Face model on the first real training run:
+
+```text
+facebook/dinov3-vits16-pretrain-lvd1689m
+```
+
+Open the [model page](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m), follow its access terms, and authenticate if required:
 
 ```powershell
 hf auth login
 ```
 
-**Expected:** authentication succeeds, and a subsequent `from_pretrained` request can access the checkpoint. Do **not** include access tokens in this README, Git commits, or screenshots. Downloaded pretrained weights are cached separately by Hugging Face; they are not contained in the project ZIP.
+**Expected:** the login succeeds and your account can access the model weights. Do not commit access tokens or cached model files to GitHub.
 
-### Step 5 — Prepare the datasets
+### Step 5 — Prepare the HAR and SGR datasets
 
-Download or copy the prepared `HAR.zip` and `SGR.zip` datasets. Create a `datasets` folder next to `main.py`, and extract each archive so that the actual files are located at:
-
-```text
-datasets/HAR/train.pt
-datasets/HAR/val.pt
-datasets/HAR/test.pt
-datasets/SGR/train.pt
-datasets/SGR/val.pt
-datasets/SGR/test.pt
-```
-
-**PowerShell example** (assuming `HAR.zip` and `SGR.zip` are in the project directory):
+Download the prepared datasets from the [Kaggle dataset page](https://www.kaggle.com/datasets/nguynngctin1881/dataset-tf-c). From the folder containing `main.py`, create the local data directory and extract `HAR.zip` and `SGR.zip` into it:
 
 ```powershell
-New-Item -ItemType Directory -Path datasets -Force
-Expand-Archive -Path HAR.zip -DestinationPath datasets -Force
-Expand-Archive -Path SGR.zip -DestinationPath datasets -Force
-Test-Path datasets/HAR/train.pt
-Test-Path datasets/SGR/val.pt
+python -c "from pathlib import Path; import zipfile; root=Path('datasets'); root.mkdir(exist_ok=True); [zipfile.ZipFile(name).extractall(root) for name in ('HAR.zip','SGR.zip')]"
 ```
 
-**Expected:** both `Test-Path` commands return `True`. If you obtain the datasets from [the project's Kaggle dataset](https://www.kaggle.com/datasets/nguynngctin1881/dataset-tf-c), download the prepared `.pt` splits and arrange them in the same directory layout.
+The ZIP archives already contain top-level `HAR/` and `SGR/` folders. **Do not create an extra nested `HAR/HAR` or `SGR/SGR` level.**
 
-Each `.pt` split must contain a dictionary with these keys:
+Verify the split files:
 
-```python
-{
-    "samples": Tensor[N, 3, 206],  # or [N, 206, 3]
-    "labels": Tensor[N]             # integer class IDs starting at 0
-}
+```powershell
+python -c "from pathlib import Path; print(all((Path('datasets')/d/(split+'.pt')).is_file() for d in ('HAR','SGR') for split in ('train','val','test')))"
 ```
 
-The loader transposes `[N, 206, 3]` if necessary and pads/truncates signals to the configured 206 samples. **Do not replace `val.pt` with `test.pt`:** the loader requires an independent validation file. Avoid placing recordings from the same acquisition session across train/validation/test when preparing new splits.
+**Expected:** the command prints `True`.
 
-**Datasets used in the project:**
+## 6. Run and Verify
 
-| Dataset | Samples / recordings | Classes | Role |
-| --- | ---: | --- | --- |
-| HAR (prepared public data) | 10,369 windows | Walking, Stairs, Sitting, Standing | Source or downstream classification; prepared `.pt` splits |
-| SGR (prepared public data) | 1,200 windows | Typing, Teeth, Drinking, Writing, Clapping, Folding | Source or downstream classification; prepared `.pt` splits |
-| Private HAR (Sensor Logger) | 12 recording sessions; 19,795 raw measurements | Walking, Stairs, Sitting, Standing | Separate exploratory/external data; **not directly loaded by this training script** |
-
-The private CSV recordings require an explicit preprocessing, windowing, labeling, and leakage-safe splitting pipeline before they can be passed to this loader. The public datasets and private recordings should not be represented as the same evaluation split.
-
-## 6. Run & Verify
-
-### Step 6 — Run offline unit tests first
-
-From the directory containing `main.py`:
+### Step 1 — Run the offline unit tests
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-**Expected result:** four tests pass, and the command ends with output similar to:
+**Expected:** four unit tests finish with `OK` when the source bundle and dependencies are installed correctly. These tests use a **mock backbone**; they do not test the downloaded DINOv3 checkpoint.
 
-```text
-Ran 4 tests in ...s
-OK
-```
-
-These tests use a lightweight **mock ViT**; they check tensor shapes, gradients, EMA logic, and dataset handling. Passing them **does not establish** that the real Hugging Face DINOv3 checkpoint loads or that the model achieves good classification accuracy.
-
-### Step 7 — Run a short real-model pre-training check
+### Step 2 — Run a short DINOv3 pretraining check
 
 ```powershell
 python main.py --training_mode pre_train --pretrain_dataset HAR --target_dataset SGR --batch_size 2 --target_batch_size 2 --epochs 1 --image_size 112 --subset
 ```
 
-**Expected behavior (if dependencies, checkpoint access, GPU memory, and dataset paths are valid):** the model initializes, runs one pre-training epoch on a subset of HAR, logs the loss components, and saves:
+**Expected, if model access, memory, and data loading succeed:** one pretraining epoch is logged and a checkpoint is saved at:
 
 ```text
-experiments_logs/HAR_2_SGR/dinov3_loss/pre_train_seed_42/
-├── train.log
-├── epoch_metrics.csv
-└── saved_models/
-    └── ckp_last.pt
+experiments_logs/HAR_2_SGR/dinov3_loss/pre_train_seed_42/saved_models/ckp_last.pt
 ```
 
-The per-epoch CSV should contain `loss`, `dino_within`, `dino_cross`, `ibot`, and `koleo`. The exact numeric losses depend on the actual run; no example loss value should be presented as a verified result.
+The same experiment directory also contains `train.log` and `epoch_metrics.csv` with the overall loss and its DINO/iBOT/KoLeo components.
 
-### Step 8 — Run full pre-training
-
-After the short test succeeds, run the full data split **without `--subset`**:
+### Step 3 — Run pretraining without the debug subset
 
 ```powershell
 python main.py --training_mode pre_train --pretrain_dataset HAR --target_dataset SGR --batch_size 2 --target_batch_size 2 --epochs 3 --image_size 112
 ```
 
-This writes to the same pre-training output directory as Step 7 and replaces its final checkpoint. Use `--run_description` to store alternative experiments separately.
+This command uses the full source training split and writes a checkpoint to the same experiment directory. Use `--run_description` to keep separate runs from overwriting each other's artifacts.
 
-### Step 9 — Fine-tune and evaluate the target dataset
+### Step 4 — Fine-tune and evaluate on SGR
 
 ```powershell
 python main.py --training_mode fine_tune_test --pretrain_dataset HAR --target_dataset SGR --batch_size 2 --target_batch_size 2 --epochs 3 --image_size 112
 ```
 
-The command loads the pretrained checkpoint from Step 8 and fine-tunes on **SGR train**, selects the best checkpoint using **SGR validation macro-F1**, and evaluates **SGR test only after selecting that checkpoint**.
-
-**Expected files:**
+**Expected:** the script loads the matching HAR pretraining checkpoint, fine-tunes on the **SGR training split**, selects the best epoch using **SGR validation macro-F1**, and evaluates the **SGR test split** after checkpoint selection.
 
 ```text
 experiments_logs/HAR_2_SGR/dinov3_loss/fine_tune_test_seed_42/
@@ -353,168 +313,79 @@ experiments_logs/HAR_2_SGR/dinov3_loss/fine_tune_test_seed_42/
     └── ckp_best.pt
 ```
 
-`test_metrics.txt` contains held-out target metrics including accuracy, macro precision, macro recall, macro F1, and confusion matrix. **No real test metrics have been reported for this updated model yet.**
+The test report includes accuracy, precision, recall, macro-F1, and a confusion matrix. **No measured performance value is asserted in this README.**
 
-### Step 10 — Optional experiment configurations
-
-```powershell
-# Optional: add self-supervised loss during fine-tuning (extra computation).
-python main.py --training_mode fine_tune_test --pretrain_dataset HAR --target_dataset SGR --batch_size 2 --target_batch_size 2 --epochs 3 --image_size 112 --finetune_ssl_weight 0.1
-
-# Optional: use a separate experiment directory.
-python main.py --training_mode pre_train --pretrain_dataset HAR --target_dataset SGR --batch_size 2 --target_batch_size 2 --epochs 3 --image_size 112 --run_description exp_dino_ibot_koleo
-```
-
-For the first optional fine-tune example, the matching pre-training checkpoint must already exist under the same `run_description`, model ID, image size, prototype count, and seed. Additional runs can require more GPU memory and time.
-
-## 7. Usage: Command-Line Interface
-
-The current package provides a **CLI**, not a REST API or web interface.
+### Step 5 — Inspect the command-line options
 
 ```powershell
 python main.py --help
 ```
 
-Selected flags (all implemented in [`main.py`](main.py)):
+**Expected:** a list of supported arguments is printed without starting training.
 
-| Option | Default | Purpose |
+## 7. Usage and Experiment Configuration
+
+This repository provides a **Python command-line training and evaluation pipeline**. It does not currently expose an HTTP endpoint or a web application.
+
+| Argument | Default | Description |
 | --- | --- | --- |
 | `--training_mode` | `pre_train` | `pre_train` or `fine_tune_test` |
-| `--pretrain_dataset` | `HAR` | Source dataset folder |
-| `--target_dataset` | `SGR` | Target dataset folder |
-| `--dataset_root` | `datasets` | Parent directory containing dataset folders |
-| `--logs_save_dir` | `experiments_logs` | Output folder |
-| `--run_description` | `dinov3_loss` | Experiment identifier (folder name) |
+| `--pretrain_dataset` | `HAR` | Source dataset directory |
+| `--target_dataset` | `SGR` | Target dataset directory |
+| `--dataset_root` | `datasets` | Parent folder containing the dataset splits |
+| `--logs_save_dir` | `experiments_logs` | Parent directory for outputs |
+| `--run_description` | `dinov3_loss` | Experiment name |
 | `--device` | `auto` | `auto`, `cpu`, or `cuda` |
 | `--seed` | `42` | Random seed |
-| `--epochs` | `3` | Epochs in the selected training stage |
-| `--batch_size` | `8` | Source pre-training batch size |
-| `--target_batch_size` | `8` | Target dataset batch size |
-| `--lr` | `1e-4` | Optimizer learning rate |
-| `--model_id` | `facebook/dinov3-vits16-pretrain-lvd1689m` | HF checkpoint ID |
-| `--image_size` | `112` | Resized signal-image height and width; must be divisible by patch size 16 |
-| `--prototypes` | `256` | Number of distillation prototypes |
-| `--teacher_temp` | `0.04` | Teacher distribution temperature |
+| `--epochs` | `3` | Number of training epochs |
+| `--batch_size` | `8` | Source pretraining batch size |
+| `--target_batch_size` | `8` | Target training/validation/test batch size |
+| `--lr` | `1e-4` | AdamW learning rate |
+| `--model_id` | `facebook/dinov3-vits16-pretrain-lvd1689m` | Pretrained checkpoint ID |
+| `--image_size` | `112` | Input image size; divisible by ViT patch size 16 |
+| `--prototypes` | `256` | Number of student/teacher prototypes |
+| `--teacher_temp` | `0.04` | Teacher temperature |
 | `--student_temp` | `0.1` | Student temperature |
-| `--ema_momentum` | `0.996` | EMA teacher update momentum |
-| `--mask_ratio` | `0.3` | Fraction of masked patch tokens |
-| `--dino_weight` | `1.0` | CLS distillation weight |
-| `--ibot_weight` | `1.0` | Masked patch distillation weight |
-| `--koleo_weight` | `0.1` | Diversity loss weight |
-| `--cross_domain_weight` | `0.25` | Cross time/frequency distillation weight |
-| `--finetune_ssl_weight` | `0.0` | Optional SSL component in supervised fine-tuning |
-| `--unfreeze_backbone` | Disabled | Allow ViT backbone weight updates; high GPU memory demand |
-| `--subset` | Disabled | Use a small source/target training subset for debugging |
+| `--ema_momentum` | `0.996` | EMA teacher update factor |
+| `--mask_ratio` | `0.3` | Masked patch proportion |
+| `--dino_weight` | `1.0` | DINO loss weight |
+| `--ibot_weight` | `1.0` | iBOT loss weight |
+| `--koleo_weight` | `0.1` | KoLeo loss weight |
+| `--cross_domain_weight` | `0.25` | Cross-domain DINO alignment weight |
+| `--finetune_ssl_weight` | `0.0` | Optional SSL loss weight during fine-tuning |
+| `--unfreeze_backbone` | Off | Train DINOv3 backbone parameters; requires more VRAM |
+| `--subset` | Off | Use a small training subset for debugging |
 
-**Model interface:** the core model takes time-domain and FFT-domain tensors and returns four tensors:
+**Core model input:** time and FFT-domain tensors of shape `[B, 3, 206]`.  
+**Representation output:** two 128-dimensional projected embeddings.  
+**Classifier output:** logits of shape `[B, number_of_target_classes]`.
 
-```python
-h_t, z_t, h_f, z_f = model(time_tensor, frequency_tensor)
-# With ViT-S/16: h_t, h_f are [B, 384]; z_t, z_f are [B, 128].
-# The downstream classifier consumes concat(z_t, z_f) -> [B, num_classes].
-```
+For controlled research comparisons, change **one parameter at a time** and record the dataset version, split, model checkpoint, random seed, hardware, validation metrics, final test metrics, and measured inference latency. Use a different `--run_description` for each experimental configuration.
 
-Both encoders are initialized from the **same pretrained checkpoint**, but are separate model instances. The full forward pass also exposes patch features for training via `forward_ssl()`.
+## 8. Troubleshooting
 
-## 8. AI Model and Evaluation Protocol
-
-### 8.1 Model card
-
-| Field | Description |
-| --- | --- |
-| Model name | TF-C Dual-DINOv3 (research adaptation) |
-| Backbone | Two independent `DINOv3ViTModel` instances initialized from Meta ViT-S/16 |
-| Model weights | Not distributed with this repository; fetched from Hugging Face |
-| Input | XYZ acceleration windows: `[B, 3, 206]`; prepared FFT magnitude internally in the loader |
-| Backbone input | Image-like `[B, 3, image_size, image_size]` for each domain |
-| Backbone output | CLS feature vectors (ViT-S/16: 384 dims) plus patch tokens |
-| Projected output | Two 128-dimensional embeddings |
-| Classification output | Unnormalized logits `[B, num_classes_target]` |
-| Prediction | `argmax(logits, dim=-1)`; confidence calibration not yet implemented |
-| Pre-training objective | Adapted DINO + iBOT + KoLeo |
-| Fine-tuning objective | Cross-Entropy, optional SSL regularization |
-| Model artifact | `saved_models/ckp_last.pt` (pre-training); `saved_models/ckp_best.pt` (fine-tuning) |
-| Versioning | Record Git commit, dataset version, `model_id`, run description, seed, and CLI arguments per experiment |
-| Main limitations | Image-domain transfer uncertainty; frozen pretrained backbones by default; small-batch Sinkhorn; incomplete official DINOv3 recipe |
-
-The scripts do not currently export ONNX, serve a `/predict` endpoint, return calibrated confidence, or implement a human-review fallback. These should not be claimed as implemented product features. If connecting a separate web demo, verify that it loads **this updated checkpoint**, rather than an older TF-C model.
-
-### 8.2 Train/validation/test boundaries
-
-- **Pre-training:** source **train** split only; labels are not used to supervise the DINO/iBOT objective.
-- **Fine-tuning:** target **train** split only.
-- **Model selection:** target **validation** macro-F1 only.
-- **Final report:** target **test** metrics after selecting a checkpoint; never tune hyperparameters using the test set.
-- **Private external evaluation:** create a separate, documented preprocessing/splitting process; keep recording-level groups together to prevent data leakage.
-
-### 8.3 Recommended experiment table (to be completed after real runs)
-
-| Experiment | Encoder | SSL objective | Test macro-F1 | Accuracy | p50/p95 latency | Status |
-| --- | --- | --- | --- | --- | --- | --- |
-| E0 | Original TF-C Transformer | Original NT-Xent-Poly | — | — | — | Not run in this package |
-| E1 | Original TF-C Transformer | Modified loss | — | — | — | Ablation requires verified integration |
-| E2 | Dual DINOv3 | Original TF-C loss | — | — | — | Ablation requires verified integration |
-| E3 | Dual DINOv3 | DINO + iBOT + KoLeo | — | — | — | Code prepared; real checkpoint test pending |
-
-**Do not fill these columns with synthetic test outputs.** Record actual dataset version and split, GPU/CPU hardware, PyTorch/Transformers versions, hyperparameters, random seed, model file size, training duration, measured inference latency, and a confusion matrix. The course guidance also calls for error analysis and traceable evidence when reporting experiments.
-
-A systematic extension could test the loss weights individually, freeze/unfreeze settings, image sizes, and model size/latency, but such experiments are **proposals**, not completed results.
-
-### 8.4 Known limitations and risks
-
-1. Pretrained DINOv3 visual representations may not transfer effectively to repeated-row accelerometer images.
-2. Image size, FFT handling, and small-batch Sinkhorn assignments can affect representation quality.
-3. Frozen backbones limit adaptation; unfrozen backbones may exceed laptop GPU memory.
-4. Two student encoders plus an EMA teacher increase RAM/VRAM usage and inference setup cost.
-5. Distillation and iBOT heads are lighter research substitutes, not exact copies of the official Meta modules.
-6. The provided unit tests use a mock backbone, not real pretrained weights.
-7. Preprocessed public HAR/SGR datasets are not automatically equivalent to the private raw Sensor Logger dataset.
-8. The current CLI does not include a standalone serving API, confidence threshold, error fallback, model export, or end-user acceptance test.
-
-## 9. Troubleshooting
-
-| Symptom | Possible cause | Recommended action |
+| Problem | Likely reason | Recommended solution |
 | --- | --- | --- |
-| `ModuleNotFoundError: transformers` | Dependencies missing or wrong Conda environment | Activate `tfc-dinov3-py311`; run `python -m pip install -r requirements.txt` |
-| `ImportError` for `DINOv3ViTModel` | Transformers build lacks the required model class | Check `transformers.__version__` and upgrade to a compatible version specified in requirements |
-| `401/403`, gated repository, or authentication error | Hugging Face account lacks model access | Request/accept access on the model page; run `hf auth login`; verify cached credentials |
-| CUDA unavailable | CPU PyTorch build, driver mismatch, or missing GPU support | Run the import/CUDA check; install a compatible official PyTorch CUDA build |
-| `CUDA out of memory` | Multiple ViT student/teacher copies do not fit | Try batch size 2 or 1, image size 112, frozen backbones, close other GPU processes, or use a larger GPU |
-| `Missing dataset split` | ZIP extracted into wrong folder or file omitted | Check exact paths `datasets/HAR/train.pt`, etc., and `--dataset_root` |
-| `Expected independent validation set` | `val.pt` is missing | Create a real separate validation split from appropriate labeled data; do **not** reuse test data |
-| `Expected ... 3 channels` | Data contains only one axis or wrong tensor layout | Prepare XYZ inputs `[N,3,L]` or `[N,L,3]`; verify sample acquisition and feature selection |
-| Checkpoint not found in fine-tuning | Pre-training was not completed with matching settings | Run pre-training first; check `run_description`, dataset names, seed, and output paths |
-| `Checkpoint architecture differs` | Model ID, image size, or prototype count changed | Use the checkpoint's exact architecture settings or generate a new matching checkpoint |
-| Loss becomes non-finite | Numerical instability, unsuitable hyperparameters, or unexpected data | Inspect input values and augmentation, reduce learning rate, log loss components, and stop the run |
-| Tests pass but real model fails | Offline tests only use a mock ViT | Check model access, Transformers compatibility, real input dimensions, device memory, and full traceback |
+| `ModuleNotFoundError` for a project dependency | Missing package or wrong environment | Activate `tfc-dinov3-py311`; rerun `python -m pip install -r requirements.txt`. |
+| `DINOv3ViTModel` cannot be imported | Unsupported Transformers version | Check `transformers.__version__` and the constraints in `requirements.txt`. |
+| Hugging Face authentication or access error | Checkpoint access not granted or login expired | Review the checkpoint's access requirements and run `hf auth login`. |
+| `torch.cuda.is_available()` is `False` | CPU-only PyTorch package or incompatible driver | Install a compatible CUDA-enabled PyTorch build and verify the NVIDIA driver. |
+| CUDA out-of-memory | Multiple DINOv3 student/teacher instances | Start with batch size 2 and image size 112, keep backbones frozen, or use a larger GPU. |
+| `Missing dataset split` | Incorrect extraction directory | Verify `datasets/HAR/train.pt`, `datasets/SGR/val.pt`, and the other split files. |
+| `Expected ... 3 channels` | Incorrect input shape or missing sensor axes | Prepare accelerometer data as `[N,3,L]` or `[N,L,3]`. |
+| `Expected independent validation set` | `val.pt` is missing | Prepare a genuine validation split; never substitute the test set. |
+| Pretrained checkpoint not found | Pretraining not completed or different experiment name | Run pretraining first with the same source/target, seed, and `--run_description`. |
+| `Checkpoint architecture differs` | Model ID, image size, or prototype count changed | Reuse the checkpoint's original settings or train a matching checkpoint. |
+| Unit tests pass but real training fails | Mock-backbone tests do not cover real DINOv3 | Check checkpoint access, actual tensor dimensions, model compatibility, and VRAM. |
 
-For debugging, include the exact command, error traceback, operating system, Python/PyTorch/Transformers versions, GPU model and VRAM, and sanitized output logs. Do not share Hugging Face authentication tokens.
+When reporting an issue, include the exact command, full traceback, relevant library versions, GPU model and VRAM, and non-sensitive logs. **Never share authentication tokens.**
 
-## 10. Reproducibility and Reviewer Checklist
+## 9. References and Attribution
 
-Use this checklist before submitting the project:
+1. **TF-C original implementation:** [mims-harvard/TFC-pretraining](https://github.com/mims-harvard/TFC-pretraining).
+2. **TF-C paper:** [Self-Supervised Contrastive Pre-Training for Time Series via Time-Frequency Consistency (NeurIPS 2022)](https://arxiv.org/abs/2206.08496).
+3. **DINOv3 official implementation:** [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3).
+4. **DINOv3 pretrained ViT-S/16 checkpoint:** [Hugging Face model page](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m).
+5. **Course documentation:** *Artificial Intelligence and Data Science Special Topics*, instructor Dat Tran, **Session 10 — How to Write a README**, pages 143–158 of the supplied course slides. The organization emphasizes project purpose, repository structure, concrete installation steps, expected results, and troubleshooting.
 
-- [ ] This README identifies the **problem, user, input, output, and current scope**.
-- [ ] Environment versions and external model access requirements are documented.
-- [ ] The modified repository can be cloned or extracted without missing Python source files.
-- [ ] Dataset directories contain separate **train**, **validation**, and **test** splits.
-- [ ] `python -m unittest discover -s tests -v` passes on the reviewer's machine.
-- [ ] A real-model subset pre-training run completes and writes its expected checkpoint.
-- [ ] Fine-tuning completes using a matching pre-training checkpoint.
-- [ ] A separate held-out test run produces `test_metrics.txt` and confusion matrix.
-- [ ] Changes to **both encoders** and the **loss function** are visible in the code comparison table.
-- [ ] Actual metrics, error examples, model size, inference latency, hardware, and limitations are reported without fabricated measurements.
-- [ ] The Git commit, dataset version, configuration, and model artifact are traceable.
-- [ ] Any claimed external demo is explicitly connected to the updated model (otherwise presented as a separate prototype).
-
-**Current evidence:** four local CPU mock-backbone/unit tests passed. Real DINOv3 checkpoint loading, HAR/SGR training metrics, latency benchmarks, and model export/deployment remain **unverified**. These are open validation tasks rather than completed deliverables.
-
-## 11. References and Attribution
-
-1. **Original TF-C repository:** [mims-harvard/TFC-pretraining](https://github.com/mims-harvard/TFC-pretraining).
-2. **TF-C publication:** *Self-Supervised Contrastive Pre-Training for Time Series via Time-Frequency Consistency*, NeurIPS 2022 — [paper](https://arxiv.org/abs/2206.08496).
-3. **DINOv3 implementation:** [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) — [official loss modules](https://github.com/facebookresearch/dinov3/tree/main/dinov3/loss) and [student–teacher architecture](https://github.com/facebookresearch/dinov3/blob/main/dinov3/train/ssl_meta_arch.py).
-4. **Pretrained DINOv3 weights:** [Meta DINOv3 ViT-S/16 on Hugging Face](https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m); follow the checkpoint's access terms and license.
-5. **Course documentation criteria:** *AI & Data Science Special Topics* lecture slides by Dat Tran, **Session 10: How to Write a README**, PDF pages 143–158. This README follows the lecture's sections: Project Overview, System Overview, Environment, Setup, Run & Verify, Usage, AI Model, Troubleshooting, and explicit expected outputs.
-
-> **Academic attribution:** The upstream TF-C framework and official DINOv3 model belong to their respective authors. The present code is a research adaptation for course experimentation and should not be presented as either team's official implementation.
+This repository is an independent academic adaptation. The underlying TF-C framework and DINOv3 pretrained models remain attributable to their respective authors and are subject to their applicable licensing and access terms.
